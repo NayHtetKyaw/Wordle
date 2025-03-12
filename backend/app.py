@@ -6,7 +6,6 @@ import os
 import uuid
 from datetime import datetime, timedelta
 
-# Firebase setup with error handling
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -24,9 +23,8 @@ except ImportError:
     use_firebase = False
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# Hardcoded word list for development (would be replaced with a more extensive list)
 WORD_LIST = [
     "WORLD", "HELLO", "GAMES", "FLASK", "REACT", "LEARN",
     "HOUSE", "CRATE", "PLATE", "SCALE", "TABLE", "SMART",
@@ -34,7 +32,6 @@ WORD_LIST = [
     "EARTH", "SPACE", "MOUNT", "QUEEN", "NIGHT", "LIGHT"
 ]
 
-# Store active games in memory (in production, this would be in a database)
 active_games = {}
 
 
@@ -45,10 +42,10 @@ class Game:
         self.max_attempts = max_attempts
         self.attempts = []
         self.evaluations = []
-        self.game_status = 'playing'  # playing, won, lost
+        self.game_status = 'playing'
         self.created_at = datetime.now()
 
-        print(f"New game created with word: {self.word}")  # For debugging
+        print(f"New game created with word: {self.word}")
 
     def make_guess(self, guess):
         """Process a guess and return the result"""
@@ -88,8 +85,12 @@ class Game:
         # Store game in Firestore if available
         if use_firebase:
             try:
-                db.collection('games').document(
-                    self.game_id).set(self.to_dict())
+                game_data = self.to_dict()
+                game_data['created_at'] = game_data['created_at'].isoformat()
+                db.collection('games').document(self.game_id).set(game_data)
+
+                if self.game_status != 'playing':
+                    self.update_user_stats('anonymous')
             except Exception as e:
                 print(f"Error saving to Firestore: {e}")
 
@@ -105,15 +106,13 @@ class Game:
         target = self.word
         evaluation = ['absent'] * len(target)
 
-        # First pass: check for correct positions
         for i in range(len(target)):
             if i < len(guess) and guess[i] == target[i]:
                 evaluation[i] = 'correct'
 
-        # Second pass: check for correct letters in wrong positions
         target_char_count = {}
         for i, char in enumerate(target):
-            if evaluation[i] != 'correct':  # Skip letters that were already marked correct
+            if evaluation[i] != 'correct':
                 target_char_count[char] = target_char_count.get(char, 0) + 1
 
         for i, char in enumerate(guess):
@@ -122,6 +121,69 @@ class Game:
                 target_char_count[char] -= 1
 
         return evaluation
+
+    def update_user_stats(self, user_id):
+        """Update user statistics when a game is completed"""
+        if not use_firebase:
+            return
+
+        try:
+            # Get the user's current stats
+            user_ref = db.collection('users').document(user_id)
+            stats_ref = user_ref.collection('stats').document('game_stats')
+            stats_doc = stats_ref.get()
+
+            if stats_doc.exists:
+                stats = stats_doc.to_dict()
+            else:
+                stats = {
+                    'played': 0,
+                    'won': 0,
+                    'current_streak': 0,
+                    'max_streak': 0,
+                    'guess_distribution': {
+                        '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0
+                    },
+                    'last_updated': datetime.now().isoformat()
+                }
+
+            # Update stats
+            stats['played'] += 1
+
+            if self.game_status == 'won':
+                stats['won'] += 1
+                stats['current_streak'] += 1
+
+                attempt_count = str(len(self.attempts))
+                if attempt_count in stats['guess_distribution']:
+                    stats['guess_distribution'][attempt_count] += 1
+            else:
+                stats['current_streak'] = 0
+
+            if stats['current_streak'] > stats['max_streak']:
+                stats['max_streak'] = stats['current_streak']
+
+            stats['last_updated'] = datetime.now().isoformat()
+
+            # Save updated stats
+            stats_ref.set(stats)
+
+            # Also store reference to this game in user's game history
+            game_history_ref = user_ref.collection('game_history')
+            game_history_ref.document(self.game_id).set({
+                'game_id': self.game_id,
+                'word': self.word,
+                'attempts': len(self.attempts),
+                'status': self.game_status,
+                'played_at': datetime.now().isoformat()
+            })
+
+            print(f"Updated stats for user {user_id}, game status: {
+                  self.game_status}, attempts: {len(self.attempts)}")
+            return True
+        except Exception as e:
+            print(f"Error updating user stats: {e}")
+            return False
 
     def to_dict(self):
         """Convert game to dictionary for Firestore storage"""
@@ -138,7 +200,7 @@ class Game:
 
 @app.route("/")
 def home():
-    return jsonify({"message": "HOME "})
+    return jsonify({"message": "Wordle Game API"})
 
 
 @app.route('/api/new-game', methods=['POST'])
@@ -157,6 +219,15 @@ def new_game():
 
     game = Game(word=word, max_attempts=max_attempts)
     active_games[game.game_id] = game
+
+    # Save new game to Firebase immediately
+    if use_firebase:
+        try:
+            game_data = game.to_dict()
+            game_data['created_at'] = game_data['created_at'].isoformat()
+            db.collection('games').document(game.game_id).set(game_data)
+        except Exception as e:
+            print(f"Error saving new game to Firestore: {e}")
 
     cleanup_old_games()
 
@@ -198,6 +269,9 @@ def make_guess():
                     game.attempts = game_data.get('attempts', [])
                     game.evaluations = game_data.get('evaluations', [])
                     game.game_status = game_data.get('game_status', 'playing')
+                    if isinstance(game_data.get('created_at'), str):
+                        game.created_at = datetime.fromisoformat(
+                            game_data.get('created_at'))
                     active_games[game_id] = game
             except Exception as e:
                 print(f"Error loading game from Firestore: {e}")
@@ -205,7 +279,18 @@ def make_guess():
     if not game:
         return jsonify({'error': 'Game not found'}), 404
 
+    previous_status = game.game_status
+
     result = game.make_guess(guess)
+
+    if previous_status == 'playing' and game.game_status != 'playing' and use_firebase:
+        try:
+            game.update_user_stats('anonymous')
+            print(f"Explicitly updated stats after game completion. Status: {
+                  game.game_status}")
+        except Exception as e:
+            print(f"Error updating stats after status change: {e}")
+
     return jsonify(result)
 
 
@@ -220,6 +305,20 @@ def get_game(game_id):
             doc = doc_ref.get()
             if doc.exists:
                 game_data = doc.to_dict()
+                # Create a Game instance for future use
+                game = Game(
+                    word=game_data.get('word'),
+                    max_attempts=game_data.get('max_attempts', 6)
+                )
+                game.game_id = game_id
+                game.attempts = game_data.get('attempts', [])
+                game.evaluations = game_data.get('evaluations', [])
+                game.game_status = game_data.get('game_status', 'playing')
+                if isinstance(game_data.get('created_at'), str):
+                    game.created_at = datetime.fromisoformat(
+                        game_data.get('created_at'))
+                active_games[game_id] = game
+
                 return jsonify({
                     'game_id': game_id,
                     'attempts': game_data.get('attempts', []),
@@ -271,22 +370,30 @@ def get_stats():
                 'stats').document('game_stats').get()
 
             if stats_doc.exists:
+                stats = stats_doc.to_dict()
+                print(f"Retrieved stats for user {user_id}: {stats}")
                 return jsonify({
                     'success': True,
-                    'stats': stats_doc.to_dict()
+                    'stats': stats
                 })
             else:
+                default_stats = {
+                    'played': 0,
+                    'won': 0,
+                    'current_streak': 0,
+                    'max_streak': 0,
+                    'guess_distribution': {
+                        '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0
+                    },
+                    'last_updated': datetime.now().isoformat()
+                }
+                # Initialize stats document so it exists next time
+                user_ref.collection('stats').document(
+                    'game_stats').set(default_stats)
+                print(f"Created default stats for user {user_id}")
                 return jsonify({
                     'success': True,
-                    'stats': {
-                        'played': 0,
-                        'won': 0,
-                        'current_streak': 0,
-                        'max_streak': 0,
-                        'guess_distribution': {
-                            '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0
-                        }
-                    }
+                    'stats': default_stats
                 })
         except Exception as e:
             print(f"Error fetching stats: {e}")
@@ -301,7 +408,8 @@ def get_stats():
             'max_streak': 4,
             'guess_distribution': {
                 '1': 1, '2': 2, '3': 2, '4': 1, '5': 1, '6': 0
-            }
+            },
+            'last_updated': datetime.now().isoformat()
         }
     })
 
