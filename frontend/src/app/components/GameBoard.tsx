@@ -235,7 +235,7 @@ export default function GameBoard({
     <Stack className="items-center space-y-4 py-4">
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-70 z-10">
-          <Loader size="xl" />
+          <Loader color="lime" type="dots" />
         </div>
       )}
 
