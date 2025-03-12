@@ -1,125 +1,209 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Button, Text, Stack, Paper, Flex } from "@mantine/core";
-import { IconBackspace, IconSend } from "@tabler/icons-react";
+import { Button, Text, Stack, Paper, Flex, Loader } from "@mantine/core";
+import { IconBackspace, IconSend, IconRefresh } from "@tabler/icons-react";
 
 interface GameBoardProps {
-  maxAttempts: number;
-  wordLength: number;
+  maxAttempts?: number;
+  wordLength?: number;
 }
 
 export default function GameBoard({
   maxAttempts = 6,
   wordLength = 5,
 }: GameBoardProps) {
-  const [attempts, setAttempts] = useState<string[][]>(
-    Array(maxAttempts)
-      .fill([])
-      .map(() => Array(wordLength).fill("")),
+  const [gameId, setGameId] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<string[][]>([]);
+  const [evaluations, setEvaluations] = useState<string[][]>([]);
+  const [currentAttempt, setCurrentAttempt] = useState<string[]>(
+    Array(wordLength).fill(""),
   );
-  const [currentAttempt, setCurrentAttempt] = useState(0);
-  const [currentPosition, setCurrentPosition] = useState(0);
   const [gameStatus, setGameStatus] = useState<"playing" | "won" | "lost">(
     "playing",
-  );
-  const [evaluation, setEvaluation] = useState<string[][]>(
-    Array(maxAttempts)
-      .fill([])
-      .map(() => Array(wordLength).fill("")),
   );
   const [keyboardStatus, setKeyboardStatus] = useState<{
     [key: string]: string;
   }>({});
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [solution, setSolution] = useState<string | null>(null);
 
-  // Mock function - will be replaced with actual API call
-  const checkWord = async (word: string) => {
+  // Start a new game
+  const startNewGame = async () => {
+    setIsLoading(true);
+    setError(null);
+
     try {
-      const response = await fetch("http://localhost:5000/api/check", {
+      const response = await fetch("http://localhost:5000/api/new-game", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ word }),
+        body: JSON.stringify({
+          word_length: wordLength,
+          max_attempts: maxAttempts,
+        }),
       });
 
       if (!response.ok) {
-        throw new Error("Network response was not ok");
+        throw new Error("Failed to start new game");
       }
 
       const data = await response.json();
-      return data;
+      setGameId(data.game_id);
+      setAttempts([]);
+      setEvaluations([]);
+      setCurrentAttempt(Array(wordLength).fill(""));
+      setGameStatus("playing");
+      setKeyboardStatus({});
+      setSolution(null);
     } catch (error) {
-      console.error("Error checking word:", error);
-      // Fallback mock response for development
-      return {
-        correct: false,
-        evaluation: Array(wordLength)
-          .fill("absent")
-          .map((_, i) =>
-            i === 0 ? "correct" : i === 1 ? "present" : "absent",
-          ),
-      };
+      setError("Failed to start new game. Please try again.");
+      console.error("Error starting new game:", error);
+    } finally {
+      setIsLoading(false);
     }
   };
+
+  // Load game state
+  const loadGameState = async (id: string) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`http://localhost:5000/api/game/${id}`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to load game");
+      }
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      // Convert attempts from strings to arrays of characters
+      const formattedAttempts = data.attempts.map((word: string) =>
+        word.split(""),
+      );
+
+      setAttempts(formattedAttempts);
+      setEvaluations(data.evaluations);
+      setGameStatus(data.game_status);
+      setSolution(data.word); // Will be null if game is still active
+
+      // Update keyboard status based on previous evaluations
+      const newKeyboardStatus = { ...keyboardStatus };
+      data.attempts.forEach((word: string, attemptIndex: number) => {
+        const evaluation = data.evaluations[attemptIndex];
+        word.split("").forEach((letter: string, letterIndex: number) => {
+          const status = evaluation[letterIndex];
+          // Only upgrade key status (absent -> present -> correct)
+          if (
+            !newKeyboardStatus[letter] ||
+            (newKeyboardStatus[letter] === "absent" && status !== "absent") ||
+            (newKeyboardStatus[letter] === "present" && status === "correct")
+          ) {
+            newKeyboardStatus[letter] = status;
+          }
+        });
+      });
+      setKeyboardStatus(newKeyboardStatus);
+    } catch (error) {
+      setError("Failed to load game. Please try again.");
+      console.error("Error loading game:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Submit a guess
+  const submitGuess = async (word: string) => {
+    if (!gameId || word.length !== wordLength || gameStatus !== "playing") {
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch("http://localhost:5000/api/guess", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          game_id: gameId,
+          word: word,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to submit guess");
+      }
+
+      const data = await response.json();
+
+      if (data.error) {
+        setError(data.error);
+        return;
+      }
+
+      // Reload game state to get updated attempts and evaluations
+      await loadGameState(gameId);
+
+      // Reset current attempt
+      setCurrentAttempt(Array(wordLength).fill(""));
+    } catch (error) {
+      setError("Failed to submit guess. Please try again.");
+      console.error("Error submitting guess:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Initialize game on component mount
+  useEffect(() => {
+    startNewGame();
+  }, []);
+
+  // Update game when gameId changes
+  useEffect(() => {
+    if (gameId) {
+      loadGameState(gameId);
+    }
+  }, [gameId]);
 
   const handleKeyPress = (key: string) => {
-    if (gameStatus !== "playing") return;
+    if (gameStatus !== "playing" || isLoading) return;
 
     if (key === "Enter") {
-      handleSubmit();
-    } else if (key === "Backspace") {
-      handleBackspace();
-    } else if (/^[a-zA-Z]$/.test(key) && currentPosition < wordLength) {
-      const newAttempts = [...attempts];
-      newAttempts[currentAttempt][currentPosition] = key.toUpperCase();
-      setAttempts(newAttempts);
-      setCurrentPosition(currentPosition + 1);
-    }
-  };
-
-  const handleBackspace = () => {
-    if (currentPosition > 0) {
-      const newAttempts = [...attempts];
-      newAttempts[currentAttempt][currentPosition - 1] = "";
-      setAttempts(newAttempts);
-      setCurrentPosition(currentPosition - 1);
-    }
-  };
-
-  const handleSubmit = async () => {
-    if (currentPosition !== wordLength) return;
-
-    const word = attempts[currentAttempt].join("");
-    const result = await checkWord(word);
-
-    // Update evaluation for the current attempt
-    const newEvaluation = [...evaluation];
-    newEvaluation[currentAttempt] = result.evaluation;
-    setEvaluation(newEvaluation);
-
-    // Update keyboard status
-    const newKeyboardStatus = { ...keyboardStatus };
-    attempts[currentAttempt].forEach((letter, index) => {
-      const status = result.evaluation[index];
-      // Only upgrade key status (absent -> present -> correct)
-      if (
-        !newKeyboardStatus[letter] ||
-        (newKeyboardStatus[letter] === "absent" && status !== "absent") ||
-        (newKeyboardStatus[letter] === "present" && status === "correct")
-      ) {
-        newKeyboardStatus[letter] = status;
+      const word = currentAttempt.join("");
+      if (word.length === wordLength) {
+        submitGuess(word);
       }
-    });
-    setKeyboardStatus(newKeyboardStatus);
-
-    if (result.correct) {
-      setGameStatus("won");
-    } else if (currentAttempt === maxAttempts - 1) {
-      setGameStatus("lost");
-    } else {
-      setCurrentAttempt(currentAttempt + 1);
-      setCurrentPosition(0);
+    } else if (key === "Backspace") {
+      const index = currentAttempt.findIndex((letter) => letter === "");
+      const deleteIndex = index === -1 ? wordLength - 1 : index - 1;
+      if (deleteIndex >= 0) {
+        const newAttempt = [...currentAttempt];
+        newAttempt[deleteIndex] = "";
+        setCurrentAttempt(newAttempt);
+      }
+    } else if (/^[a-zA-Z]$/.test(key)) {
+      const index = currentAttempt.findIndex((letter) => letter === "");
+      if (index !== -1) {
+        const newAttempt = [...currentAttempt];
+        newAttempt[index] = key.toUpperCase();
+        setCurrentAttempt(newAttempt);
+      }
     }
   };
 
@@ -132,7 +216,7 @@ export default function GameBoard({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [currentAttempt, currentPosition, attempts, gameStatus]);
+  }, [currentAttempt, gameStatus, isLoading]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -149,38 +233,101 @@ export default function GameBoard({
 
   return (
     <Stack className="items-center space-y-4 py-4">
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-70 z-10">
+          <Loader size="xl" />
+        </div>
+      )}
+
+      {error && <Text className="text-red-500 font-bold">{error}</Text>}
+
+      {/* Game controls - New Game button is always visible */}
+      <Flex className="justify-center gap-4 w-full">
+        <Button
+          onClick={startNewGame}
+          className="bg-blue-500 hover:bg-blue-600 text-white"
+          // leftIcon={<IconRefresh size={20} />}
+          disabled={isLoading}
+        >
+          New Game
+        </Button>
+      </Flex>
+
       <Paper className="p-4 rounded">
-        {attempts.map((row, rowIndex) => (
-          <Flex key={rowIndex} className="mb-2 justify-center">
-            {row.map((letter, colIndex) => (
+        {/* Previous attempts */}
+        {attempts.map((attempt, attemptIndex) => (
+          <Flex key={`attempt-${attemptIndex}`} className="mb-2 justify-center">
+            {attempt.map((letter, letterIndex) => (
               <div
-                key={colIndex}
-                className={`w-14 h-14 m-1 flex items-center justify-center text-2xl font-bold ${
-                  rowIndex < currentAttempt || gameStatus !== "playing"
-                    ? getStatusColor(evaluation[rowIndex][colIndex])
-                    : "bg-white border-2 border-gray-300"
-                }`}
+                key={`attempt-${attemptIndex}-letter-${letterIndex}`}
+                className={`w-14 h-14 m-1 flex items-center justify-center text-2xl font-bold ${getStatusColor(
+                  evaluations[attemptIndex]?.[letterIndex] || "",
+                )}`}
               >
                 {letter}
               </div>
             ))}
           </Flex>
         ))}
+
+        {/* Current attempt (only show if game is still active) */}
+        {gameStatus === "playing" && (
+          <Flex className="mb-2 justify-center">
+            {currentAttempt.map((letter, index) => (
+              <div
+                key={`current-${index}`}
+                className="w-14 h-14 m-1 flex items-center justify-center text-2xl font-bold bg-white border-2 border-gray-300"
+              >
+                {letter}
+              </div>
+            ))}
+          </Flex>
+        )}
+
+        {/* Empty rows for remaining attempts */}
+        {gameStatus === "playing" &&
+          Array.from({ length: maxAttempts - attempts.length - 1 }).map(
+            (_, rowIndex) => (
+              <Flex key={`empty-${rowIndex}`} className="mb-2 justify-center">
+                {Array.from({ length: wordLength }).map((_, colIndex) => (
+                  <div
+                    key={`empty-${rowIndex}-${colIndex}`}
+                    className="w-14 h-14 m-1 flex items-center justify-center text-2xl font-bold bg-white border-2 border-gray-300 border-dashed"
+                  ></div>
+                ))}
+              </Flex>
+            ),
+          )}
       </Paper>
 
+      {/* Game status message */}
       {gameStatus === "won" && (
         <Text className="text-green-500 text-2xl font-bold">You won!</Text>
       )}
 
       {gameStatus === "lost" && (
-        <Text className="text-red-500 text-2xl font-bold">Game over!</Text>
+        <Text className="text-red-500 text-2xl font-bold">
+          Game over! The word was: {solution}
+        </Text>
       )}
 
-      <VirtualKeyboard
-        onKeyPress={handleKeyPress}
-        keyboardStatus={keyboardStatus}
-        disabled={gameStatus !== "playing"}
-      />
+      {/* Virtual keyboard (only show if game is active) */}
+      {gameStatus === "playing" ? (
+        <VirtualKeyboard
+          onKeyPress={handleKeyPress}
+          keyboardStatus={keyboardStatus}
+          disabled={isLoading}
+        />
+      ) : (
+        <Button
+          onClick={startNewGame}
+          className="mt-4 bg-blue-500 hover:bg-blue-600 text-white"
+          // leftIcon={<IconRefresh size={20} />}
+          disabled={isLoading}
+        >
+          Play Again
+        </Button>
+      )}
     </Stack>
   );
 }
@@ -221,7 +368,7 @@ function VirtualKeyboard({
   return (
     <div className="max-w-lg mx-auto">
       {rows.map((row, rowIndex) => (
-        <Flex key={rowIndex} className="m-2 justify-center">
+        <Flex key={rowIndex} className="mb-2 justify-center">
           {row.map((key) => (
             <Button
               p="xs"
