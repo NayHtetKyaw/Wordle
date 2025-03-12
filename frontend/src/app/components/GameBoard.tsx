@@ -1,12 +1,28 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Button, Text, Stack, Paper, Flex, Loader } from "@mantine/core";
-import { IconBackspace, IconSend, IconRefresh } from "@tabler/icons-react";
+import { Button, Text, Stack, Paper, Flex, Loader, Modal } from "@mantine/core";
+import {
+  IconBackspace,
+  IconSend,
+  // IconRefresh,
+  // IconChartBar,
+} from "@tabler/icons-react";
+import { getStats } from "../services/api";
 
 interface GameBoardProps {
   maxAttempts?: number;
   wordLength?: number;
+}
+
+interface GameStats {
+  played: number;
+  won: number;
+  current_streak: number;
+  max_streak: number;
+  guess_distribution: {
+    [key: string]: number;
+  };
 }
 
 export default function GameBoard({
@@ -29,7 +45,11 @@ export default function GameBoard({
   const [error, setError] = useState<string | null>(null);
   const [solution, setSolution] = useState<string | null>(null);
 
-  // Start a new game
+  // New state for stats
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [stats, setStats] = useState<GameStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
   const startNewGame = async () => {
     setIsLoading(true);
     setError(null);
@@ -89,7 +109,6 @@ export default function GameBoard({
         throw new Error(data.error);
       }
 
-      // Convert attempts from strings to arrays of characters
       const formattedAttempts = data.attempts.map((word: string) =>
         word.split(""),
       );
@@ -97,15 +116,13 @@ export default function GameBoard({
       setAttempts(formattedAttempts);
       setEvaluations(data.evaluations);
       setGameStatus(data.game_status);
-      setSolution(data.word); // Will be null if game is still active
+      setSolution(data.word);
 
-      // Update keyboard status based on previous evaluations
       const newKeyboardStatus = { ...keyboardStatus };
       data.attempts.forEach((word: string, attemptIndex: number) => {
         const evaluation = data.evaluations[attemptIndex];
         word.split("").forEach((letter: string, letterIndex: number) => {
           const status = evaluation[letterIndex];
-          // Only upgrade key status (absent -> present -> correct)
           if (
             !newKeyboardStatus[letter] ||
             (newKeyboardStatus[letter] === "absent" && status !== "absent") ||
@@ -124,7 +141,6 @@ export default function GameBoard({
     }
   };
 
-  // Submit a guess
   const submitGuess = async (word: string) => {
     if (!gameId || word.length !== wordLength || gameStatus !== "playing") {
       return;
@@ -156,11 +172,13 @@ export default function GameBoard({
         return;
       }
 
-      // Reload game state to get updated attempts and evaluations
       await loadGameState(gameId);
 
-      // Reset current attempt
       setCurrentAttempt(Array(wordLength).fill(""));
+
+      if (data.game_status === "won" || data.game_status === "lost") {
+        fetchStats();
+      }
     } catch (error) {
       setError("Failed to submit guess. Please try again.");
       console.error("Error submitting guess:", error);
@@ -169,12 +187,28 @@ export default function GameBoard({
     }
   };
 
-  // Initialize game on component mount
+  const fetchStats = async () => {
+    setStatsLoading(true);
+    try {
+      const response = await getStats();
+      if (response.success) {
+        setStats(response.stats);
+      } else {
+        console.error("Error fetching stats:", response.error);
+      }
+    } catch (error) {
+      console.error("Error fetching stats:", error);
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
   useEffect(() => {
     startNewGame();
+    // Fetch stats on initial load
+    fetchStats();
   }, []);
 
-  // Update game when gameId changes
   useEffect(() => {
     if (gameId) {
       loadGameState(gameId);
@@ -234,14 +268,14 @@ export default function GameBoard({
   return (
     <Stack className="items-center space-y-4 py-4">
       {isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-70 z-10">
-          <Loader color="lime" type="dots" />
+        <div className="absolute inset-0 flex items-center justify-center bg-white opacity-50 z-10">
+          <Loader color="blue" type="dots" />
         </div>
       )}
 
       {error && <Text className="text-red-500 font-bold">{error}</Text>}
 
-      {/* Game controls - New Game button is always visible */}
+      {/* Game controls - New Game button and Stats button */}
       <Flex className="justify-center gap-4 w-full">
         <Button
           onClick={startNewGame}
@@ -250,6 +284,17 @@ export default function GameBoard({
           disabled={isLoading}
         >
           New Game
+        </Button>
+        <Button
+          onClick={() => {
+            fetchStats();
+            setStatsOpen(true);
+          }}
+          className="bg-purple-500 hover:bg-purple-600 text-white"
+          // leftIcon={<IconChartBar size={20} />}
+          disabled={isLoading}
+        >
+          Stats
         </Button>
       </Flex>
 
@@ -328,6 +373,74 @@ export default function GameBoard({
           Play Again
         </Button>
       )}
+
+      <Modal
+        opened={statsOpen}
+        onClose={() => setStatsOpen(false)}
+        title="Game Statistics"
+        size="lg"
+      >
+        {statsLoading ? (
+          <div className="flex justify-center p-4">
+            <Loader color="blue" type="dots" />
+          </div>
+        ) : stats ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-4 gap-2 text-center">
+              <div className="p-3 bg-gray-100 rounded">
+                <div className="text-2xl font-bold">{stats.played}</div>
+                <div className="text-sm">Played</div>
+              </div>
+              <div className="p-3 bg-gray-100 rounded">
+                <div className="text-2xl font-bold">
+                  {stats.played > 0
+                    ? Math.round((stats.won / stats.played) * 100)
+                    : 0}
+                  %
+                </div>
+                <div className="text-sm">Win %</div>
+              </div>
+              <div className="p-3 bg-gray-100 rounded">
+                <div className="text-2xl font-bold">{stats.current_streak}</div>
+                <div className="text-sm">Current Streak</div>
+              </div>
+              <div className="p-3 bg-gray-100 rounded">
+                <div className="text-2xl font-bold">{stats.max_streak}</div>
+                <div className="text-sm">Max Streak</div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-lg font-bold mb-2">Guess Distribution</h3>
+              <div className="space-y-2">
+                {Object.entries(stats.guess_distribution)
+                  .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                  .map(([guess, count]) => {
+                    const maxCount = Math.max(
+                      ...Object.values(stats.guess_distribution),
+                    );
+                    const percentage =
+                      maxCount > 0 ? (count / maxCount) * 100 : 0;
+
+                    return (
+                      <div key={guess} className="flex items-center">
+                        <div className="w-4 mr-2">{guess}</div>
+                        <div
+                          className="bg-blue-500 text-white px-2 py-1 rounded text-right"
+                          style={{ width: `${Math.max(percentage, 5)}%` }}
+                        >
+                          {count}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Text>No statistics available yet. Play some games first!</Text>
+        )}
+      </Modal>
     </Stack>
   );
 }
